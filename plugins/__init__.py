@@ -56,7 +56,9 @@ def get_all_plugins() -> dict[str, "SitePlugin"]:
 from plugins.mepsking import MepskingPlugin  # noqa: E402
 from plugins.ampow import AmpowPlugin  # noqa: E402
 from plugins.dfr import DFRPlugin  # noqa: E402
+from plugins.thobby import THobbyPlugin  # noqa: E402
 
 register(MepskingPlugin())
 register(AmpowPlugin())
 register(DFRPlugin())
+register(THobbyPlugin())
