@@ -3,7 +3,7 @@
 
 {% block content %}
 
-{% if not summaries %}
+{% if not items %}
 <div class="text-center py-24">
   <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-brand-50 mb-4">
     <svg class="w-8 h-8 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -101,8 +101,8 @@
         {% endif %}
 
         <div class="flex-1 min-w-0 flex items-baseline gap-1.5 text-xs">
-          <a href="/products/{{ e.product.handle }}" class="font-medium text-gray-700 hover:text-brand-600 truncate shrink-0 max-w-[28%]">{{ e.product.title }}</a>
-          <span class="text-gray-400 truncate shrink min-w-0">{{ e.variant.name }}</span>
+          <a href="/products/{{ e.product.slug }}" class="font-medium text-gray-700 hover:text-brand-600 truncate shrink-0 max-w-[28%]">{{ e.product.title }}</a>
+          <span class="text-gray-400 truncate shrink min-w-0">{{ e.site_label }} · {{ e.variant.name }}</span>
           <span class="text-gray-500 shrink-0">
             {% if e.event_type == "started" %}
               started at <span class="font-medium text-gray-700">{{ e.currency }}{{ "%.2f"|format(e.check.price) }}</span>
@@ -136,13 +136,15 @@
 {% endif %}
 
 {% set ns = namespace(sites=[]) %}
-{% for s in summaries %}
-  {% if s.product.site not in ns.sites %}{% set ns.sites = ns.sites + [s.product.site] %}{% endif %}
+{% for i in items %}
+  {% for site in i.sites %}
+    {% if site not in ns.sites %}{% set ns.sites = ns.sites + [site] %}{% endif %}
+  {% endfor %}
 {% endfor %}
 
 <div class="flex flex-wrap items-center gap-3 mb-6">
-  <h1 class="text-2xl font-bold text-gray-800">Tracked Products
-    <span id="product-count" class="ml-2 text-base font-normal text-gray-400">({{ summaries|length }})</span>
+  <h1 class="text-2xl font-bold text-gray-800">Tracked Items
+    <span id="product-count" class="ml-2 text-base font-normal text-gray-400">({{ items|length }})</span>
   </h1>
   {% if ns.sites | length > 1 %}
   <div class="flex gap-2 ml-auto">
@@ -161,13 +163,13 @@
 </div>
 
 <div id="product-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-  {% for s in summaries %}
-  {% set product = s.product %}
+  {% for i in items %}
+  {% set product = i.product %}
   <div class="bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow overflow-hidden flex flex-col"
-    data-site="{{ product.site }}">
+    data-site="{{ i.sites | join(' ') }}">
 
     {% if product.image_url %}
-    <a href="/products/{{ product.handle }}">
+    <a href="/products/{{ product.slug }}">
       <img src="{{ product.image_url }}" alt="{{ product.title }}"
         class="w-full h-44 object-cover bg-gray-100"/>
     </a>
@@ -182,46 +184,44 @@
 
     <div class="p-4 flex flex-col flex-1">
       <h2 class="font-semibold text-gray-800 text-sm leading-snug mb-3 line-clamp-2">
-        <a href="/products/{{ product.handle }}" class="hover:text-brand-600 transition-colors">
+        <a href="/products/{{ product.slug }}" class="hover:text-brand-600 transition-colors">
           {{ product.title }}
         </a>
       </h2>
 
       <div class="mt-auto">
-        {% if s.min_price is not none %}
-        <div class="flex items-end gap-2 mb-1">
-          {% if s.has_multi_pack %}
-          <span class="text-2xl font-bold text-gray-900">{{ s.currency }}{{ "%.2f"|format(s.best_per_unit) }}<span class="text-sm font-normal text-gray-400">/item</span></span>
-          {% else %}
-          <span class="text-2xl font-bold text-gray-900">{{ s.currency }}{{ "%.2f"|format(s.min_price) }}</span>
-          {% endif %}
-          {% if s.change_pct is not none %}
-            {% if s.change_pct < 0 %}
-            <span class="text-sm font-semibold text-emerald-600 mb-0.5">
-              ↓ {{ s.change_pct }}%
-            </span>
-            {% elif s.change_pct > 0 %}
-            <span class="text-sm font-semibold text-red-500 mb-0.5">
-              ↑ +{{ s.change_pct }}%
+        <div class="space-y-1.5 mb-1">
+          {% for ls in i.listings %}
+          <div class="flex items-center justify-between gap-2 {% if not loop.first %}pt-1.5 border-t border-gray-100{% endif %}">
+            <span class="text-xs font-medium text-gray-400">{{ ls.plugin.display_name if ls.plugin else ls.listing.site }} · {{ ls.variant_count }} variant{{ 's' if ls.variant_count != 1 }}</span>
+            {% if ls.min_price is not none %}
+            <span class="flex items-baseline gap-1.5">
+              {% if ls.has_multi_pack %}
+              <span class="font-bold text-gray-900">{{ ls.currency }}{{ "%.2f"|format(ls.best_per_unit) }}<span class="text-xs font-normal text-gray-400">/item</span></span>
+              {% else %}
+              <span class="font-bold text-gray-900">{{ ls.currency }}{{ "%.2f"|format(ls.min_price) }}</span>
+              {% endif %}
+              {% if ls.change_pct is not none %}
+                {% if ls.change_pct < 0 %}
+                <span class="text-xs font-semibold text-emerald-600">↓{{ ls.change_pct }}%</span>
+                {% elif ls.change_pct > 0 %}
+                <span class="text-xs font-semibold text-red-500">↑+{{ ls.change_pct }}%</span>
+                {% endif %}
+              {% endif %}
             </span>
             {% else %}
-            <span class="text-sm text-gray-400 mb-0.5">no change</span>
+            <span class="text-xs text-gray-400">No price data</span>
             {% endif %}
-          {% endif %}
+          </div>
+          {% endfor %}
         </div>
-        {% if s.has_multi_pack %}
-        <p class="text-xs text-gray-400 -mt-0.5 mb-1">Best deal: {{ s.best_per_unit_variant }}</p>
-        {% endif %}
-        {% else %}
-        <p class="text-sm text-gray-400 mb-1">No price data yet</p>
-        {% endif %}
 
         <div class="flex items-center justify-between text-xs text-gray-400 mt-2">
-          <span>{{ s.variant_count }} variant{{ 's' if s.variant_count != 1 }}</span>
-          <span>checked {{ time_ago(product.last_checked_at) }}</span>
+          <span>{{ i.listings|length }} shop{{ 's' if i.listings|length != 1 }}</span>
+          <span>checked {{ time_ago(i.last_checked_at) }}</span>
         </div>
 
-        <a href="/products/{{ product.handle }}"
+        <a href="/products/{{ product.slug }}"
           class="mt-3 block text-center text-sm font-medium text-brand-600 hover:text-brand-700 border border-brand-200 hover:border-brand-400 rounded-lg py-1.5 transition-colors">
           View Details
         </a>
@@ -244,7 +244,7 @@ function filterSite(site, btn) {
   const cards = document.querySelectorAll('#product-grid [data-site]');
   let visible = 0;
   cards.forEach(card => {
-    const show = !site || card.dataset.site === site;
+    const show = !site || card.dataset.site.split(' ').includes(site);
     card.style.display = show ? '' : 'none';
     if (show) visible++;
   });

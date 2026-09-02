@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 from unittest.mock import patch
 
-from database import Base, get_db, Product, Variant, PriceCheck
+from database import Base, get_db, Product, Listing, Variant, PriceCheck
 from main import app
 
 # Shared fake product payload (what fetch_product returns — a JSON-LD ProductGroup dict)
@@ -104,16 +104,25 @@ def admin_client(client):
 @pytest.fixture
 def seeded_product(db_session):
     product = Product(
-        handle="test-motor",
+        slug="test-motor",
         title="Test FPV Motor",
         image_url="https://img-meps.mepsking.top/material/1/test-motor.jpg",
-        product_url="https://www.mepsking.shop/test-motor.html",
     )
     db_session.add(product)
     db_session.flush()
 
-    v1 = Variant(product_id=product.id, external_variant_id="1111111111111111111", name="1900KV / Blue", sku="TEST-1900", tracked=True)
-    v2 = Variant(product_id=product.id, external_variant_id="2222222222222222222", name="2500KV / Red", sku="TEST-2500", tracked=True)
+    listing = Listing(
+        product_id=product.id,
+        site="mepsking",
+        handle="test-motor",
+        product_url="https://www.mepsking.shop/test-motor.html",
+        image_url="https://img-meps.mepsking.top/material/1/test-motor.jpg",
+    )
+    db_session.add(listing)
+    db_session.flush()
+
+    v1 = Variant(listing_id=listing.id, external_variant_id="1111111111111111111", name="1900KV / Blue", sku="TEST-1900", tracked=True)
+    v2 = Variant(listing_id=listing.id, external_variant_id="2222222222222222222", name="2500KV / Red", sku="TEST-2500", tracked=True)
     db_session.add_all([v1, v2])
     db_session.flush()
 

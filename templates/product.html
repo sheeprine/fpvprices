@@ -12,7 +12,7 @@
     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
     </svg>
-    All Products
+    All Items
   </a>
 
   <div class="flex items-start gap-5">
@@ -22,25 +22,21 @@
     {% endif %}
     <div class="flex-1 min-w-0">
       <h1 class="text-xl font-bold text-gray-800 leading-snug">{{ product.title }}</h1>
-      <a href="{{ product.product_url }}" target="_blank"
-        class="text-sm text-brand-600 hover:underline mt-1 inline-block">
-        View on {{ plugin.display_name }} ↗
-      </a>
-      <p class="text-xs text-gray-400 mt-1">Last checked {{ time_ago(product.last_checked_at) }}</p>
+      <p class="text-xs text-gray-400 mt-1">Tracked on {{ listings_data|length }} shop{{ 's' if listings_data|length != 1 }}</p>
     </div>
     <div class="flex gap-2 shrink-0">
-      <form method="post" action="/products/{{ product.handle }}/check">
+      <form method="post" action="/products/{{ product.slug }}/check">
         <button type="submit"
           class="inline-flex items-center gap-1.5 text-sm border border-gray-300 hover:border-gray-400 text-gray-600 px-3 py-1.5 rounded-lg transition-colors">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
               d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
           </svg>
-          Check Now
+          Check All
         </button>
       </form>
-      <form method="post" action="/products/{{ product.handle }}/delete"
-        onsubmit="return confirm('Remove this product from tracking?')">
+      <form method="post" action="/products/{{ product.slug }}/delete"
+        onsubmit="return confirm('Remove this item and all its shop listings from tracking?')">
         <button type="submit"
           class="inline-flex items-center gap-1.5 text-sm border border-red-200 hover:border-red-400 text-red-500 hover:text-red-600 px-3 py-1.5 rounded-lg transition-colors">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -54,15 +50,40 @@
   </div>
 </div>
 
-{% if not variant_data %}
-<div class="text-center py-16 text-gray-400">No price data available yet. Click "Check Now" to fetch prices.</div>
-{% else %}
-
-<!-- Variants summary table -->
+{% for ld in listings_data %}
+{% set listing = ld.listing %}
+{% set plugin = ld.plugin %}
 <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden mb-6">
-  <div class="px-5 py-3 border-b border-gray-100">
-    <h2 class="font-semibold text-gray-700 text-sm">Current Prices</h2>
+  <div class="px-5 py-3 border-b border-gray-100 flex items-center justify-between gap-3 flex-wrap">
+    <div>
+      <h2 class="font-semibold text-gray-700 text-sm">
+        {{ plugin.display_name if plugin else listing.site }}
+        <a href="{{ listing.product_url }}" target="_blank" class="ml-2 text-xs font-normal text-brand-600 hover:underline">
+          View ↗
+        </a>
+      </h2>
+      <p class="text-xs text-gray-400 mt-0.5">Last checked {{ time_ago(listing.last_checked_at) }}</p>
+    </div>
+    <div class="flex gap-2 shrink-0">
+      <form method="post" action="/listings/{{ listing.id }}/check">
+        <button type="submit"
+          class="text-xs border border-gray-300 hover:border-gray-400 text-gray-600 px-2.5 py-1 rounded-lg transition-colors">
+          Check Now
+        </button>
+      </form>
+      <form method="post" action="/listings/{{ listing.id }}/delete"
+        onsubmit="return confirm('Stop tracking this shop for this item?')">
+        <button type="submit"
+          class="text-xs border border-red-200 hover:border-red-400 text-red-500 hover:text-red-600 px-2.5 py-1 rounded-lg transition-colors">
+          Remove listing
+        </button>
+      </form>
+    </div>
   </div>
+
+  {% if not ld.variant_data %}
+  <div class="text-center py-10 text-gray-400 text-sm">No price data available yet. Click "Check Now" to fetch prices.</div>
+  {% else %}
   <div class="overflow-x-auto">
     <table class="w-full text-sm">
       <thead class="bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
@@ -70,7 +91,7 @@
           <th class="px-5 py-3 text-left">Variant</th>
           {% if plugin.tracks_stock %}<th class="px-5 py-3 text-left">Status</th>{% endif %}
           <th class="px-5 py-3 text-right">Current</th>
-          {% if has_multi_pack %}<th class="px-5 py-3 text-right">Per Item</th>{% endif %}
+          {% if ld.has_multi_pack %}<th class="px-5 py-3 text-right">Per Item</th>{% endif %}
           <th class="px-5 py-3 text-right">Original (RRP)</th>
           <th class="px-5 py-3 text-right">First Tracked</th>
           <th class="px-5 py-3 text-right">Change</th>
@@ -78,7 +99,7 @@
         </tr>
       </thead>
       <tbody class="divide-y divide-gray-100">
-        {% for v in variant_data %}
+        {% for v in ld.variant_data %}
         <tr class="hover:bg-gray-50 {% if plugin.tracks_stock and not v.in_stock %}opacity-60{% endif %}">
           <td class="px-5 py-3 font-medium text-gray-800">
             {{ v.variant.name }}
@@ -96,7 +117,7 @@
           </td>
           {% endif %}
           <td class="px-5 py-3 text-right font-semibold text-gray-900">{{ plugin.currency }}{{ "%.2f"|format(v.latest_price) }}</td>
-          {% if has_multi_pack %}
+          {% if ld.has_multi_pack %}
           <td class="px-5 py-3 text-right text-gray-500">{{ plugin.currency }}{{ "%.2f"|format(v.price_per_unit) }}</td>
           {% endif %}
           <td class="px-5 py-3 text-right text-gray-400">
@@ -118,10 +139,13 @@
       </tbody>
     </table>
   </div>
+  {% endif %}
 </div>
+{% endfor %}
 
 <!-- Price history chart -->
-<div class="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+{% if chart_labels_json != '[]' %}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm p-5 mb-6">
   <div class="flex items-center justify-between mb-4">
     <h2 class="font-semibold text-gray-700 text-sm">Price History</h2>
     <div class="flex gap-1" id="rangeButtons">
@@ -141,8 +165,6 @@
 (function() {
   const datasets = {{ chart_datasets_json|safe }};
   const allLabels = {{ chart_labels_json|safe }};
-  const currency = {{ plugin.currency | tojson }};
-  const tracksStock = {{ 'true' if plugin.tracks_stock else 'false' }};
 
   const COLORS = [
     '#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#84cc16'
@@ -239,7 +261,7 @@
     fill: false,
     spanGaps: false,
     segment: {
-      borderDash: (ctx) => (tracksStock && initial.stockData[i][ctx.p0DataIndex] === false) ? [6, 4] : undefined,
+      borderDash: (ctx) => (initial.stockData[i][ctx.p0DataIndex] === false) ? [6, 4] : undefined,
     },
   }));
 
@@ -259,7 +281,7 @@
         },
         tooltip: {
           callbacks: {
-            label: ctx => ` ${ctx.dataset.label}: ${currency}${ctx.parsed.y?.toFixed(2) ?? 'N/A'}`
+            label: ctx => ` ${ctx.dataset.label}: ${datasets[ctx.datasetIndex].currency}${ctx.parsed.y?.toFixed(2) ?? 'N/A'}`
           }
         }
       },
@@ -276,7 +298,6 @@
         },
         y: {
           ticks: {
-            callback: v => currency + v.toFixed(2),
             color: '#9ca3af',
             font: { size: 11 }
           },
@@ -302,7 +323,7 @@
       ds.data = data[i];
       ds.pointRadius = labels.length > 20 ? 2 : 4;
       ds.segment = {
-        borderDash: (ctx) => (tracksStock && stockData[i][ctx.p0DataIndex] === false) ? [6, 4] : undefined,
+        borderDash: (ctx) => (stockData[i][ctx.p0DataIndex] === false) ? [6, 4] : undefined,
       };
     });
     chart.update();
@@ -323,6 +344,28 @@
   });
 })();
 </script>
-
 {% endif %}
+
+{% if other_products %}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+  <h2 class="font-semibold text-gray-700 text-sm mb-1">Merge into another tracked item</h2>
+  <p class="text-xs text-gray-400 mb-3">If this item is a duplicate of one already being tracked, move all of its shop listings there and remove this entry.</p>
+  <form method="post" action="/products/{{ product.slug }}/merge"
+    onsubmit="return confirm('Merge this item\'s shop listings into the selected item? This entry will be removed.')"
+    class="flex flex-wrap gap-2">
+    <select name="target_product_id" required
+      class="flex-1 min-w-[200px] border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+      <option value="" disabled selected>Select an item…</option>
+      {% for p in other_products %}
+      <option value="{{ p.id }}">{{ p.title }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit"
+      class="text-sm border border-gray-300 hover:border-gray-400 text-gray-600 px-4 py-2 rounded-lg transition-colors">
+      Merge
+    </button>
+  </form>
+</div>
+{% endif %}
+
 {% endblock %}

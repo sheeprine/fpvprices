@@ -12,9 +12,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, aliased
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import init_db, get_db, Product, Variant, PriceCheck
+from database import init_db, get_db, generate_unique_slug, Product, Listing, Variant, PriceCheck
 from plugins import get_plugin_for_url, get_plugin, get_all_plugins
-from scheduler import start_scheduler, stop_scheduler, check_product_prices
+from scheduler import start_scheduler, stop_scheduler, check_listing_prices
 
 SESSION_SECRET = os.environ.get("SESSION_SECRET") or secrets.token_hex(32)
 
@@ -36,15 +36,18 @@ class AdminRequired(Exception):
     pass
 
 
-_POST_ONLY_SUFFIXES = ("/check", "/delete")
+_POST_ONLY_SUFFIXES = ("/check", "/delete", "/merge")
 
 @app.exception_handler(AdminRequired)
 async def admin_required_handler(request: Request, exc: AdminRequired):
     path = request.url.path
-    for suffix in _POST_ONLY_SUFFIXES:
-        if path.endswith(suffix):
-            path = path[: -len(suffix)]
-            break
+    if path.startswith("/products/"):
+        for suffix in _POST_ONLY_SUFFIXES:
+            if path.endswith(suffix):
+                path = path[: -len(suffix)]
+                break
+    else:
+        path = "/add"
     return RedirectResponse(f"/admin/login?next={path}", status_code=303)
 
 
@@ -98,6 +101,59 @@ _prev_stock_sq = (
 )
 
 
+def _listing_summary(listing: Listing, product: Product, db: Session) -> Optional[dict]:
+    plugin = get_plugin(listing.site)
+    tracked = [v for v in listing.variants if v.tracked]
+    if not tracked:
+        return None
+
+    min_price = None
+    previous_price = None
+    best_per_unit = None
+    best_per_unit_variant = None
+    has_multi_pack = False
+    for variant in tracked:
+        checks = (
+            db.query(PriceCheck)
+            .filter_by(variant_id=variant.id)
+            .order_by(PriceCheck.checked_at.asc())
+            .all()
+        )
+        if not checks:
+            continue
+        latest = checks[-1].price
+        previous = checks[-2].price if len(checks) > 1 else None
+        pack_count = plugin.extract_pack_count(variant.name)
+        if pack_count == 1 and len(tracked) == 1:
+            pack_count = plugin.extract_pack_count(product.title)
+        if pack_count > 1:
+            has_multi_pack = True
+        per_unit = latest / pack_count
+        if min_price is None or latest < min_price:
+            min_price = latest
+        if previous is not None and (previous_price is None or previous < previous_price):
+            previous_price = previous
+        if best_per_unit is None or per_unit < best_per_unit:
+            best_per_unit = per_unit
+            best_per_unit_variant = variant.name
+
+    change_pct = None
+    if min_price is not None and previous_price and previous_price > 0:
+        change_pct = round((min_price - previous_price) / previous_price * 100, 1)
+
+    return {
+        "listing": listing,
+        "plugin": plugin,
+        "min_price": min_price,
+        "change_pct": change_pct,
+        "variant_count": len(tracked),
+        "best_per_unit": best_per_unit,
+        "best_per_unit_variant": best_per_unit_variant,
+        "has_multi_pack": has_multi_pack,
+        "currency": plugin.currency if plugin else "$",
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(
     request: Request,
@@ -107,62 +163,24 @@ def index(
 ):
     products = db.query(Product).order_by(Product.created_at.desc()).all()
 
-    product_summaries = []
+    item_summaries = []
     for product in products:
-        plugin = get_plugin(product.site or "mepsking")
-        tracked = [v for v in product.variants if v.tracked]
-        if not tracked:
+        listing_summaries = [
+            summary for listing in product.listings
+            if (summary := _listing_summary(listing, product, db)) is not None
+        ]
+        if not listing_summaries:
             continue
-
-        min_price = None
-        previous_price = None
-        best_per_unit = None
-        best_per_unit_variant = None
-        has_multi_pack = False
-        for variant in tracked:
-            checks = (
-                db.query(PriceCheck)
-                .filter_by(variant_id=variant.id)
-                .order_by(PriceCheck.checked_at.asc())
-                .all()
-            )
-            if not checks:
-                continue
-            latest = checks[-1].price
-            previous = checks[-2].price if len(checks) > 1 else None
-            pack_count = plugin.extract_pack_count(variant.name)
-            if pack_count == 1 and len(tracked) == 1:
-                pack_count = plugin.extract_pack_count(product.title)
-            if pack_count > 1:
-                has_multi_pack = True
-            per_unit = latest / pack_count
-            if min_price is None or latest < min_price:
-                min_price = latest
-            if previous is not None and (previous_price is None or previous < previous_price):
-                previous_price = previous
-            if best_per_unit is None or per_unit < best_per_unit:
-                best_per_unit = per_unit
-                best_per_unit_variant = variant.name
-
-        change_pct = None
-        if min_price is not None and previous_price and previous_price > 0:
-            change_pct = round((min_price - previous_price) / previous_price * 100, 1)
-
-        product_summaries.append(
-            {
-                "product": product,
-                "min_price": min_price,
-                "change_pct": change_pct,
-                "variant_count": len(tracked),
-                "best_per_unit": best_per_unit,
-                "best_per_unit_variant": best_per_unit_variant,
-                "has_multi_pack": has_multi_pack,
-                "currency": plugin.currency if plugin else "$",
-            }
-        )
+        checked_ats = [ls["listing"].last_checked_at for ls in listing_summaries if ls["listing"].last_checked_at]
+        item_summaries.append({
+            "product": product,
+            "listings": listing_summaries,
+            "sites": [ls["listing"].site for ls in listing_summaries],
+            "last_checked_at": max(checked_ats) if checked_ats else None,
+        })
 
     filter_type = filter if filter in ACTIVITY_FILTERS else "all"
-    base_q = db.query(PriceCheck).join(Variant).join(Product)
+    base_q = db.query(PriceCheck).join(Variant).join(Listing).join(Product)
     if filter_type == "price":
         base_q = base_q.filter(PriceCheck.price != _prev_price_sq)
     elif filter_type == "stock":
@@ -184,8 +202,9 @@ def index(
     events = []
     for check in recent_checks:
         variant = check.variant
-        product = variant.product
-        plugin = get_plugin(product.site or "mepsking")
+        listing = variant.listing
+        product = listing.product
+        plugin = get_plugin(listing.site)
         prev = (
             db.query(PriceCheck)
             .filter(PriceCheck.variant_id == check.variant_id, PriceCheck.id < check.id)
@@ -206,16 +225,18 @@ def index(
         events.append({
             "check": check,
             "variant": variant,
+            "listing": listing,
             "product": product,
             "prev": prev,
             "event_type": event_type,
             "currency": plugin.currency if plugin else "$",
             "tracks_stock": plugin.tracks_stock if plugin else False,
+            "site_label": plugin.display_name if plugin else listing.site,
         })
 
     site_names = {name: p.display_name for name, p in get_all_plugins().items()}
     return templates.TemplateResponse(request, "index.html", {
-        "summaries": product_summaries,
+        "items": item_summaries,
         "events": events,
         "page": page,
         "total_pages": total_pages,
@@ -259,7 +280,7 @@ def add_page(request: Request, error: Optional[str] = None, _=Depends(require_ad
 
 
 @app.post("/lookup", response_class=HTMLResponse)
-def lookup_product(request: Request, url: str = Form(...), _=Depends(require_admin)):
+def lookup_product(request: Request, url: str = Form(...), db: Session = Depends(get_db), _=Depends(require_admin)):
     plugin = get_plugin_for_url(url)
     if not plugin:
         return templates.TemplateResponse(
@@ -282,7 +303,15 @@ def lookup_product(request: Request, url: str = Form(...), _=Depends(require_adm
         )
 
     product_data = plugin.parse_product(raw)
-    return templates.TemplateResponse(request, "preview.html", {"product": product_data, "plugin": plugin})
+    existing_listing = db.query(Listing).filter_by(site=plugin.name, handle=handle).first()
+    existing_products = db.query(Product).order_by(Product.title).all()
+
+    return templates.TemplateResponse(request, "preview.html", {
+        "product": product_data,
+        "plugin": plugin,
+        "existing_listing": existing_listing,
+        "existing_products": existing_products,
+    })
 
 
 @app.post("/track")
@@ -291,6 +320,7 @@ def track_product(
     handle: str = Form(...),
     site: str = Form(...),
     variant_ids: list[str] = Form(default=[]),
+    item_id: Optional[str] = Form(default=None),
     db: Session = Depends(get_db),
     _=Depends(require_admin),
 ):
@@ -301,7 +331,7 @@ def track_product(
     if not plugin:
         raise HTTPException(status_code=400, detail="Unknown site")
 
-    existing = db.query(Product).filter_by(handle=handle).first()
+    existing_listing = db.query(Listing).filter_by(site=site, handle=handle).first()
 
     raw = plugin.fetch_product(handle)
     if not raw:
@@ -309,30 +339,49 @@ def track_product(
 
     data = plugin.parse_product(raw)
 
-    if not existing:
-        product = Product(
-            handle=data["handle"],
-            title=data["title"],
-            image_url=data["image_url"],
-            product_url=data["product_url"],
-            site=plugin.name,
-        )
-        db.add(product)
-        db.flush()
+    if existing_listing:
+        listing = existing_listing
+        product = listing.product
     else:
-        product = existing
+        target_product = None
+        if item_id:
+            try:
+                target_product = db.query(Product).filter_by(id=int(item_id)).first()
+            except ValueError:
+                target_product = None
+
+        if target_product:
+            product = target_product
+        else:
+            product = Product(
+                slug=generate_unique_slug(db, data["title"]),
+                title=data["title"],
+                image_url=data["image_url"],
+            )
+            db.add(product)
+            db.flush()
+
+        listing = Listing(
+            product_id=product.id,
+            site=plugin.name,
+            handle=data["handle"],
+            product_url=data["product_url"],
+            image_url=data["image_url"],
+        )
+        db.add(listing)
+        db.flush()
 
     for v_data in data["variants"]:
         if v_data["external_variant_id"] not in variant_ids:
             continue
         existing_variant = (
             db.query(Variant)
-            .filter_by(product_id=product.id, external_variant_id=v_data["external_variant_id"])
+            .filter_by(listing_id=listing.id, external_variant_id=v_data["external_variant_id"])
             .first()
         )
         if not existing_variant:
             variant = Variant(
-                product_id=product.id,
+                listing_id=listing.id,
                 external_variant_id=v_data["external_variant_id"],
                 name=v_data["name"],
                 sku=v_data["sku"],
@@ -350,104 +399,177 @@ def track_product(
         else:
             existing_variant.tracked = True
 
-    product.last_checked_at = datetime.now(timezone.utc)
+    listing.last_checked_at = datetime.now(timezone.utc)
+    product_slug = product.slug
     db.commit()
 
-    return RedirectResponse(f"/products/{handle}", status_code=303)
+    return RedirectResponse(f"/products/{product_slug}", status_code=303)
 
 
-@app.get("/products/{handle}", response_class=HTMLResponse)
-def product_detail(request: Request, handle: str, db: Session = Depends(get_db)):
-    product = db.query(Product).filter_by(handle=handle).first()
+@app.get("/products/{slug}", response_class=HTMLResponse)
+def product_detail(request: Request, slug: str, db: Session = Depends(get_db)):
+    product = db.query(Product).filter_by(slug=slug).first()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    plugin = get_plugin(product.site or "mepsking")
-    tracked_variants = [v for v in product.variants if v.tracked]
-
-    variant_data = []
+    listings_data = []
     chart_datasets = []
     all_labels = set()
 
-    for variant in tracked_variants:
-        checks = (
-            db.query(PriceCheck)
-            .filter_by(variant_id=variant.id)
-            .order_by(PriceCheck.checked_at.asc())
-            .all()
-        )
-        if not checks:
-            continue
+    for listing in product.listings:
+        plugin = get_plugin(listing.site)
+        tracked_variants = [v for v in listing.variants if v.tracked]
 
-        first_price = checks[0].price
-        latest_price = checks[-1].price
-        previous_price = checks[-2].price if len(checks) > 1 else None
-        compare_at = checks[-1].compare_at_price
-        in_stock = checks[-1].in_stock
-        change_pct = round((latest_price - previous_price) / previous_price * 100, 1) if previous_price else 0
-        pack_count = plugin.extract_pack_count(variant.name)
-        if pack_count == 1 and len(tracked_variants) == 1:
-            pack_count = plugin.extract_pack_count(product.title)
+        variant_data = []
+        for variant in tracked_variants:
+            checks = (
+                db.query(PriceCheck)
+                .filter_by(variant_id=variant.id)
+                .order_by(PriceCheck.checked_at.asc())
+                .all()
+            )
+            if not checks:
+                continue
 
-        variant_data.append(
-            {
-                "variant": variant,
-                "first_price": first_price,
-                "latest_price": latest_price,
-                "compare_at_price": compare_at,
-                "in_stock": in_stock,
-                "change_pct": change_pct,
-                "change_count": sum(1 for i in range(1, len(checks)) if checks[i].price != checks[i-1].price),
-                "pack_count": pack_count,
-                "price_per_unit": latest_price / pack_count,
-            }
-        )
+            first_price = checks[0].price
+            latest_price = checks[-1].price
+            previous_price = checks[-2].price if len(checks) > 1 else None
+            compare_at = checks[-1].compare_at_price
+            in_stock = checks[-1].in_stock
+            change_pct = round((latest_price - previous_price) / previous_price * 100, 1) if previous_price else 0
+            pack_count = plugin.extract_pack_count(variant.name)
+            if pack_count == 1 and len(tracked_variants) == 1:
+                pack_count = plugin.extract_pack_count(product.title)
 
-        labels = [c.checked_at.strftime("%Y-%m-%d %H:%M") for c in checks]
-        prices = [c.price for c in checks]
-        stock = [c.in_stock for c in checks]
-        for label in labels:
-            all_labels.add(label)
+            variant_data.append(
+                {
+                    "variant": variant,
+                    "first_price": first_price,
+                    "latest_price": latest_price,
+                    "compare_at_price": compare_at,
+                    "in_stock": in_stock,
+                    "change_pct": change_pct,
+                    "change_count": sum(1 for i in range(1, len(checks)) if checks[i].price != checks[i-1].price),
+                    "pack_count": pack_count,
+                    "price_per_unit": latest_price / pack_count,
+                }
+            )
 
-        chart_datasets.append(
-            {
-                "label": variant.name,
-                "labels": labels,
-                "data": prices,
-                "stock": stock,
-            }
-        )
+            labels = [c.checked_at.strftime("%Y-%m-%d %H:%M") for c in checks]
+            prices = [c.price for c in checks]
+            stock = [c.in_stock for c in checks]
+            for label in labels:
+                all_labels.add(label)
+
+            chart_datasets.append(
+                {
+                    "label": f"{plugin.display_name}: {variant.name}",
+                    "labels": labels,
+                    "data": prices,
+                    "stock": stock,
+                    "currency": plugin.currency,
+                }
+            )
+
+        has_multi_pack = any(v["pack_count"] > 1 for v in variant_data)
+        listings_data.append({
+            "listing": listing,
+            "plugin": plugin,
+            "variant_data": variant_data,
+            "has_multi_pack": has_multi_pack,
+        })
 
     sorted_labels = sorted(all_labels)
-    has_multi_pack = any(v["pack_count"] > 1 for v in variant_data)
+    other_products = (
+        db.query(Product)
+        .filter(Product.id != product.id)
+        .order_by(Product.title)
+        .all()
+    )
 
     return templates.TemplateResponse(request, "product.html", {
         "product": product,
-        "plugin": plugin,
-        "variant_data": variant_data,
+        "listings_data": listings_data,
         "chart_datasets_json": json.dumps(chart_datasets),
         "chart_labels_json": json.dumps(sorted_labels),
-        "has_multi_pack": has_multi_pack,
+        "other_products": other_products,
     })
 
 
-@app.post("/products/{handle}/check")
-def manual_check(handle: str, db: Session = Depends(get_db), _=Depends(require_admin)):
-    product = db.query(Product).filter_by(handle=handle).first()
+@app.post("/listings/{listing_id}/check")
+def manual_check_listing(listing_id: int, db: Session = Depends(get_db), _=Depends(require_admin)):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    product_slug = listing.product.slug
+    check_listing_prices(listing_id)
+    return RedirectResponse(f"/products/{product_slug}", status_code=303)
+
+
+@app.post("/listings/{listing_id}/delete")
+def delete_listing(listing_id: int, db: Session = Depends(get_db), _=Depends(require_admin)):
+    listing = db.get(Listing, listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    product = listing.product
+    product_slug = product.slug
+    remaining = (
+        db.query(Listing)
+        .filter(Listing.product_id == product.id, Listing.id != listing_id)
+        .count()
+    )
+    db.delete(listing)
+    if remaining == 0:
+        db.delete(product)
+        db.commit()
+        return RedirectResponse("/", status_code=303)
+    db.commit()
+    return RedirectResponse(f"/products/{product_slug}", status_code=303)
+
+
+@app.post("/products/{slug}/check")
+def manual_check_product(slug: str, db: Session = Depends(get_db), _=Depends(require_admin)):
+    product = db.query(Product).filter_by(slug=slug).first()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
-    check_product_prices(handle)
-    return RedirectResponse(f"/products/{handle}", status_code=303)
+    for listing_id in [listing.id for listing in product.listings]:
+        check_listing_prices(listing_id)
+    return RedirectResponse(f"/products/{slug}", status_code=303)
 
 
-@app.post("/products/{handle}/delete")
-def delete_product(handle: str, db: Session = Depends(get_db), _=Depends(require_admin)):
-    product = db.query(Product).filter_by(handle=handle).first()
+@app.post("/products/{slug}/delete")
+def delete_product(slug: str, db: Session = Depends(get_db), _=Depends(require_admin)):
+    product = db.query(Product).filter_by(slug=slug).first()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     db.delete(product)
     db.commit()
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/products/{slug}/merge")
+def merge_product(
+    slug: str,
+    target_product_id: int = Form(...),
+    db: Session = Depends(get_db),
+    _=Depends(require_admin),
+):
+    product = db.query(Product).filter_by(slug=slug).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    target = db.get(Product, target_product_id)
+    if not target:
+        raise HTTPException(status_code=400, detail="Target item not found")
+    if target.id == product.id:
+        raise HTTPException(status_code=400, detail="Cannot merge an item into itself")
+
+    for listing in list(product.listings):
+        target.listings.append(listing)
+    db.delete(product)
+    target_slug = target.slug
+    db.commit()
+
+    return RedirectResponse(f"/products/{target_slug}", status_code=303)
 
 
 def main():  # pragma: no cover

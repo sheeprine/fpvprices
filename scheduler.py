@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
-from database import engine, Product, Variant, PriceCheck
+from database import engine, Listing, PriceCheck
 from plugins import get_plugin
 
 logger = logging.getLogger(__name__)
@@ -12,40 +12,40 @@ scheduler = BackgroundScheduler()
 
 def check_all_prices():
     with Session(engine) as session:
-        products = session.query(Product).all()
-        for product in products:
+        listings = session.query(Listing).all()
+        for listing in listings:
             try:
-                check_product_prices(product.handle, session)
+                check_listing_prices(listing.id, session)
             except Exception:
-                logger.exception("Error checking prices for %s", product.handle)
+                logger.exception("Error checking prices for listing %s", listing.id)
         session.commit()
 
 
-def check_product_prices(handle: str, session: Session | None = None):
+def check_listing_prices(listing_id: int, session: Session | None = None):
     own_session = session is None
     if own_session:
         session = Session(engine)
 
     try:
-        product = session.query(Product).filter_by(handle=handle).first()
-        if not product:
+        listing = session.get(Listing, listing_id)
+        if not listing:
             return
 
-        plugin = get_plugin(product.site or "mepsking")
+        plugin = get_plugin(listing.site)
         if not plugin:
             return
 
         now = datetime.now(timezone.utc)
-        product.last_checked_at = now
+        listing.last_checked_at = now
 
-        raw = plugin.fetch_product(handle)
+        raw = plugin.fetch_product(listing.handle)
         if not raw:
-            logger.warning("Failed to fetch product %s from %s", handle, product.site)
+            logger.warning("Failed to fetch listing %s from %s", listing.handle, listing.site)
             return
 
         data = plugin.parse_product(raw)
 
-        variant_map = {v.external_variant_id: v for v in product.variants}
+        variant_map = {v.external_variant_id: v for v in listing.variants}
 
         seen_external_ids = set()
         for v_data in data["variants"]:
@@ -76,7 +76,7 @@ def check_product_prices(handle: str, session: Session | None = None):
                 session.add(check)
 
         if plugin.tracks_stock:
-            for variant in product.variants:
+            for variant in listing.variants:
                 if not variant.tracked or variant.external_variant_id in seen_external_ids:
                     continue
                 last = (
