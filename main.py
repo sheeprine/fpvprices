@@ -115,7 +115,7 @@ def index(
             continue
 
         min_price = None
-        first_price = None
+        previous_price = None
         best_per_unit = None
         best_per_unit_variant = None
         has_multi_pack = False
@@ -129,7 +129,7 @@ def index(
             if not checks:
                 continue
             latest = checks[-1].price
-            first = checks[0].price
+            previous = checks[-2].price if len(checks) > 1 else None
             pack_count = plugin.extract_pack_count(variant.name)
             if pack_count == 1 and len(tracked) == 1:
                 pack_count = plugin.extract_pack_count(product.title)
@@ -138,21 +138,20 @@ def index(
             per_unit = latest / pack_count
             if min_price is None or latest < min_price:
                 min_price = latest
-            if first_price is None or first < first_price:
-                first_price = first
+            if previous is not None and (previous_price is None or previous < previous_price):
+                previous_price = previous
             if best_per_unit is None or per_unit < best_per_unit:
                 best_per_unit = per_unit
                 best_per_unit_variant = variant.name
 
         change_pct = None
-        if min_price is not None and first_price and first_price > 0:
-            change_pct = round((min_price - first_price) / first_price * 100, 1)
+        if min_price is not None and previous_price and previous_price > 0:
+            change_pct = round((min_price - previous_price) / previous_price * 100, 1)
 
         product_summaries.append(
             {
                 "product": product,
                 "min_price": min_price,
-                "first_price": first_price,
                 "change_pct": change_pct,
                 "variant_count": len(tracked),
                 "best_per_unit": best_per_unit,
@@ -382,9 +381,10 @@ def product_detail(request: Request, handle: str, db: Session = Depends(get_db))
 
         first_price = checks[0].price
         latest_price = checks[-1].price
+        previous_price = checks[-2].price if len(checks) > 1 else None
         compare_at = checks[-1].compare_at_price
         in_stock = checks[-1].in_stock
-        change_pct = round((latest_price - first_price) / first_price * 100, 1) if first_price else 0
+        change_pct = round((latest_price - previous_price) / previous_price * 100, 1) if previous_price else 0
         pack_count = plugin.extract_pack_count(variant.name)
         if pack_count == 1 and len(tracked_variants) == 1:
             pack_count = plugin.extract_pack_count(product.title)
