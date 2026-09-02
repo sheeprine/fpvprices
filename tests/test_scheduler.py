@@ -5,9 +5,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from database import Base, Product, Variant, PriceCheck
+from database import Base, Product, Listing, Variant, PriceCheck
 from plugins import get_plugin
-from scheduler import check_product_prices, check_all_prices, start_scheduler, stop_scheduler
+from scheduler import check_listing_prices, check_all_prices, start_scheduler, stop_scheduler
 
 FAKE_RAW = {
     "@context": "https://schema.org/",
@@ -52,17 +52,22 @@ def session(engine):
 
 
 @pytest.fixture
-def product_with_variant(session):
-    product = Product(
-        handle="test-motor",
-        title="Test FPV Motor",
-        product_url="https://www.mepsking.shop/test-motor.html",
-    )
+def listing_with_variant(session):
+    product = Product(slug="test-motor", title="Test FPV Motor")
     session.add(product)
     session.flush()
 
-    variant = Variant(
+    listing = Listing(
         product_id=product.id,
+        site="mepsking",
+        handle="test-motor",
+        product_url="https://www.mepsking.shop/test-motor.html",
+    )
+    session.add(listing)
+    session.flush()
+
+    variant = Variant(
+        listing_id=listing.id,
         external_variant_id="1111111111111111111",
         name="1900KV / Blue",
         sku="TEST-1900",
@@ -74,16 +79,16 @@ def product_with_variant(session):
     session.add(PriceCheck(variant_id=variant.id, price=16.90, compare_at_price=26.90))
     session.commit()
 
-    return product, variant
+    return listing, variant
 
 
-class TestCheckProductPrices:
-    def test_creates_new_price_check(self, session, product_with_variant):
-        product, variant = product_with_variant
+class TestCheckListingPrices:
+    def test_creates_new_price_check(self, session, listing_with_variant):
+        listing, variant = listing_with_variant
 
         plugin = get_plugin("mepsking")
         with patch.object(plugin, "fetch_product", return_value=FAKE_RAW):
-            check_product_prices("test-motor", session=session)
+            check_listing_prices(listing.id, session=session)
         session.commit()
 
         session.expire_all()
@@ -92,55 +97,55 @@ class TestCheckProductPrices:
         assert checks[-1].price == 14.90
         assert checks[-1].compare_at_price == 26.90
 
-    def test_updates_last_checked_at(self, session, product_with_variant):
-        product, _ = product_with_variant
-        assert product.last_checked_at is None
+    def test_updates_last_checked_at(self, session, listing_with_variant):
+        listing, _ = listing_with_variant
+        assert listing.last_checked_at is None
 
         plugin = get_plugin("mepsking")
         with patch.object(plugin, "fetch_product", return_value=FAKE_RAW):
-            check_product_prices("test-motor", session=session)
+            check_listing_prices(listing.id, session=session)
         session.commit()
 
         session.expire_all()
-        product = session.query(Product).filter_by(handle="test-motor").first()
-        assert product.last_checked_at is not None
+        listing = session.query(Listing).filter_by(id=listing.id).first()
+        assert listing.last_checked_at is not None
 
-    def test_unknown_handle_is_noop(self, session):
-        check_product_prices("nonexistent", session=session)
+    def test_unknown_listing_id_is_noop(self, session):
+        check_listing_prices(999999, session=session)
         session.commit()
 
         assert session.query(PriceCheck).count() == 0
 
-    def test_fetch_failure_still_updates_last_checked_at(self, session, product_with_variant):
-        product, variant = product_with_variant
+    def test_fetch_failure_still_updates_last_checked_at(self, session, listing_with_variant):
+        listing, variant = listing_with_variant
 
         plugin = get_plugin("mepsking")
         with patch.object(plugin, "fetch_product", return_value=None):
-            check_product_prices("test-motor", session=session)
+            check_listing_prices(listing.id, session=session)
         session.commit()
 
         session.expire_all()
-        product = session.query(Product).filter_by(handle="test-motor").first()
-        assert product.last_checked_at is not None
+        listing = session.query(Listing).filter_by(id=listing.id).first()
+        assert listing.last_checked_at is not None
         checks = session.query(PriceCheck).filter_by(variant_id=variant.id).all()
         assert len(checks) == 1
 
-    def test_skips_untracked_variants(self, session, product_with_variant):
-        product, variant = product_with_variant
+    def test_skips_untracked_variants(self, session, listing_with_variant):
+        listing, variant = listing_with_variant
         variant.tracked = False
         session.commit()
 
         plugin = get_plugin("mepsking")
         with patch.object(plugin, "fetch_product", return_value=FAKE_RAW):
-            check_product_prices("test-motor", session=session)
+            check_listing_prices(listing.id, session=session)
         session.commit()
 
         session.expire_all()
         checks = session.query(PriceCheck).filter_by(variant_id=variant.id).all()
         assert len(checks) == 1
 
-    def test_ignores_unknown_variant_ids_from_api(self, session, product_with_variant):
-        _, variant = product_with_variant
+    def test_ignores_unknown_variant_ids_from_api(self, session, listing_with_variant):
+        listing, variant = listing_with_variant
         raw = {**FAKE_RAW, "hasVariant": [{
             "sku": "9999999999999999999",
             "productId": "UNKNOWN",
@@ -151,7 +156,7 @@ class TestCheckProductPrices:
 
         plugin = get_plugin("mepsking")
         with patch.object(plugin, "fetch_product", return_value=raw):
-            check_product_prices("test-motor", session=session)
+            check_listing_prices(listing.id, session=session)
         session.commit()
 
         # The tracked variant disappeared from the page → marked out-of-stock (2 checks total)
@@ -161,8 +166,8 @@ class TestCheckProductPrices:
         assert len(checks) == 2
         assert checks[-1].in_stock is False
 
-    def test_marks_missing_variant_as_out_of_stock(self, session, product_with_variant):
-        _, variant = product_with_variant
+    def test_marks_missing_variant_as_out_of_stock(self, session, listing_with_variant):
+        listing, variant = listing_with_variant
         # Seed the variant as explicitly in-stock
         session.query(PriceCheck).filter_by(variant_id=variant.id).delete()
         session.add(PriceCheck(variant_id=variant.id, price=14.90, compare_at_price=26.90, in_stock=True))
@@ -172,7 +177,7 @@ class TestCheckProductPrices:
         raw_empty = {**FAKE_RAW, "hasVariant": []}
         plugin = get_plugin("mepsking")
         with patch.object(plugin, "fetch_product", return_value=raw_empty):
-            check_product_prices("test-motor", session=session)
+            check_listing_prices(listing.id, session=session)
         session.commit()
 
         session.expire_all()
@@ -181,8 +186,8 @@ class TestCheckProductPrices:
         assert checks[-1].in_stock is False
         assert checks[-1].price == 14.90
 
-    def test_does_not_duplicate_out_of_stock_for_already_missing_variant(self, session, product_with_variant):
-        _, variant = product_with_variant
+    def test_does_not_duplicate_out_of_stock_for_already_missing_variant(self, session, listing_with_variant):
+        listing, variant = listing_with_variant
         # Variant already recorded as out-of-stock
         session.query(PriceCheck).filter_by(variant_id=variant.id).delete()
         session.add(PriceCheck(variant_id=variant.id, price=14.90, compare_at_price=26.90, in_stock=False))
@@ -191,15 +196,15 @@ class TestCheckProductPrices:
         raw_empty = {**FAKE_RAW, "hasVariant": []}
         plugin = get_plugin("mepsking")
         with patch.object(plugin, "fetch_product", return_value=raw_empty):
-            check_product_prices("test-motor", session=session)
+            check_listing_prices(listing.id, session=session)
         session.commit()
 
         session.expire_all()
         checks = session.query(PriceCheck).filter_by(variant_id=variant.id).all()
         assert len(checks) == 1
 
-    def test_skips_price_check_when_unchanged(self, session, product_with_variant):
-        _, variant = product_with_variant
+    def test_skips_price_check_when_unchanged(self, session, listing_with_variant):
+        listing, variant = listing_with_variant
         # Seed the same price that FAKE_RAW returns (14.90)
         session.query(PriceCheck).filter_by(variant_id=variant.id).delete()
         session.add(PriceCheck(variant_id=variant.id, price=14.90, compare_at_price=26.90))
@@ -207,71 +212,83 @@ class TestCheckProductPrices:
 
         plugin = get_plugin("mepsking")
         with patch.object(plugin, "fetch_product", return_value=FAKE_RAW):
-            check_product_prices("test-motor", session=session)
+            check_listing_prices(listing.id, session=session)
         session.commit()
 
         session.expire_all()
         checks = session.query(PriceCheck).filter_by(variant_id=variant.id).all()
         assert len(checks) == 1
 
-    def test_own_session_path(self, engine, product_with_variant):
+    def test_own_session_path(self, engine, listing_with_variant):
         plugin = get_plugin("mepsking")
+        listing, variant = listing_with_variant
         with patch("scheduler.engine", engine):
             with patch.object(plugin, "fetch_product", return_value=FAKE_RAW):
-                check_product_prices("test-motor")
+                check_listing_prices(listing.id)
 
-        _, variant = product_with_variant
         with Session(engine) as s:
             checks = s.query(PriceCheck).filter_by(variant_id=variant.id).all()
         assert len(checks) == 2
 
 
 class TestCheckAllPrices:
-    def test_checks_all_products(self, engine, session):
+    def test_checks_all_listings(self, engine, session):
+        listing_ids = []
         for handle in ("motor-a", "motor-b"):
-            p = Product(handle=handle, title=handle.upper(), product_url=f"https://www.mepsking.shop/{handle}.html")
-            session.add(p)
+            product = Product(slug=handle, title=handle.upper())
+            session.add(product)
+            session.flush()
+            listing = Listing(product_id=product.id, site="mepsking", handle=handle, product_url=f"https://www.mepsking.shop/{handle}.html")
+            session.add(listing)
+            session.flush()
+            listing_ids.append(listing.id)
         session.commit()
 
         with patch("scheduler.engine", engine):
-            with patch("scheduler.check_product_prices") as mock_check:
+            with patch("scheduler.check_listing_prices") as mock_check:
                 check_all_prices()
 
-        handles_checked = {call.args[0] for call in mock_check.call_args_list}
-        assert handles_checked == {"motor-a", "motor-b"}
+        checked_ids = {call.args[0] for call in mock_check.call_args_list}
+        assert checked_ids == set(listing_ids)
 
     def test_empty_db_does_not_error(self, engine):
         with patch("scheduler.engine", engine):
             check_all_prices()
 
-    def test_one_product_error_does_not_skip_others(self, engine, session):
+    def test_one_listing_error_does_not_skip_others(self, engine, session):
+        listing_ids = []
         for handle in ("motor-a", "motor-b"):
-            p = Product(handle=handle, title=handle.upper(), product_url=f"https://www.mepsking.shop/{handle}.html")
-            session.add(p)
+            product = Product(slug=handle, title=handle.upper())
+            session.add(product)
+            session.flush()
+            listing = Listing(product_id=product.id, site="mepsking", handle=handle, product_url=f"https://www.mepsking.shop/{handle}.html")
+            session.add(listing)
+            session.flush()
+            listing_ids.append(listing.id)
         session.commit()
 
         call_order = []
 
-        def side_effect(handle, *args, **kwargs):
-            call_order.append(handle)
-            if handle == "motor-a":
+        def side_effect(listing_id, *args, **kwargs):
+            call_order.append(listing_id)
+            if listing_id == listing_ids[0]:
                 raise RuntimeError("simulated failure")
 
         with patch("scheduler.engine", engine):
-            with patch("scheduler.check_product_prices", side_effect=side_effect):
+            with patch("scheduler.check_listing_prices", side_effect=side_effect):
                 check_all_prices()
 
-        assert set(call_order) == {"motor-a", "motor-b"}
+        assert set(call_order) == set(listing_ids)
 
 
-class TestCheckProductPricesUnknownPlugin:
-    def test_unknown_site_is_noop(self, session, product_with_variant):
-        product, variant = product_with_variant
-        product.site = "nonexistent_plugin"
+class TestCheckListingPricesUnknownPlugin:
+    def test_unknown_site_is_noop(self, session, listing_with_variant):
+        listing, variant = listing_with_variant
+        listing.site = "nonexistent_plugin"
         session.commit()
 
         count_before = session.query(PriceCheck).filter_by(variant_id=variant.id).count()
-        check_product_prices("test-motor", session=session)
+        check_listing_prices(listing.id, session=session)
         count_after = session.query(PriceCheck).filter_by(variant_id=variant.id).count()
 
         assert count_before == count_after

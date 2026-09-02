@@ -10,9 +10,10 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
 # Copy application source
-COPY main.py database.py scraper.py scheduler.py ./
+COPY main.py database.py scraper.py scheduler.py alembic.ini ./
 COPY plugins/ plugins/
 COPY templates/ templates/
+COPY migrations/ migrations/
 
 # Persistent storage for the SQLite database
 RUN mkdir -p /data && \
